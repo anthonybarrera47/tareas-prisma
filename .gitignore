@@ -1,0 +1,16 @@
+node_modules/
+.env
+
+# Directorios de agentes e IDE
+.agents/
+.claude/
+.windsurf/
+.gemini/
+skills-lock.json
+
+# Archivos de compilación de Prisma
+/generated/prisma
+
+# Sistema operativo
+.DS_Store
+Thumbs.db
