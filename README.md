@@ -50,11 +50,21 @@ tareas-prisma/
 │   │   └── 20260908195120_init/
 │   │       └── migration.sql       # Script DDL de creación de la tabla "Tarea"
 │   └── schema.prisma               # Definición declarativa del modelo de datos
-├── .env                            # Credenciales y cadena de conexión a la BD
+├── src/
+│   ├── db.js                       # Conexión centralizada a PostgreSQL con Prisma 7
+│   ├── controllers/
+│   │   └── tareas.controller.js    # Lógica de negocio y consultas Prisma
+│   ├── middlewares/
+│   │   ├── logger.middleware.js    # Trazabilidad y logging de peticiones HTTP
+│   │   └── validaciones.middleware.js # Validaciones de payloads
+│   ├── routes/
+│   │   └── tareas.routes.js        # Enrutador Express para /tareas
+│   └── index.js                    # Punto de entrada y configuración del servidor
+├── .env.example                    # Plantilla de variables de entorno
 ├── .gitignore                      # Exclusión de node_modules y .env
-├── index.js                        # Código fuente del servidor, middlewares y rutas
-├── package.json                    # Manifiesto de dependencias y scripts
+├── package.json                    # Manifiesto de dependencias y scripts ("main": "src/index.js")
 ├── prisma7.config.ts               # Archivo de configuración central de Prisma 7
+├── generate_presentation.py        # Script generador de la presentación
 └── Presentacion_Proyecto_Tareas_Prisma.pptx # Presentación explicativa
 ```
 
@@ -186,132 +196,87 @@ Este comando realiza dos acciones clave:
 
 ---
 
-### Paso 7: Servidor, Middlewares y Endpoints CRUD
-Crea el archivo `index.js` en la raíz con el siguiente contenido:
+### Paso 7: Arquitectura Modular (`src/`)
 
+Para mantener una base de código escalable, profesional y desacoplada, el proyecto se divide en capas:
+
+#### 1. Conexión de Base de Datos (`src/db.js`)
+Centraliza la conexión con el driver adapter `@prisma/adapter-pg` y exporta la instancia de `PrismaClient`:
 ```javascript
+// src/db.js
 import "dotenv/config";
-import express from "express";
 import { PrismaPg } from "@prisma/adapter-pg";
 import { PrismaClient } from "@prisma/client";
 
-const app = express();
-
-// 1. Inicialización del Driver Adapter de PostgreSQL para Prisma 7
 const adapter = new PrismaPg({
     connectionString: process.env.DATABASE_URL
 });
 
-const prisma = new PrismaClient({
-    adapter
-});
+export const prisma = new PrismaClient({ adapter });
+```
 
-// 2. Middlewares globales
-app.use(express.json());
-
-// Middleware de auditoría y logging
-app.use((req, res, next) => {
-    console.log(`[${new Date().toISOString()}] ${req.method} ${req.url}`);
-    next();
-});
-
-// Middleware de validación para la creación de tareas
-const validarDescripcion = (req, res, next) => {
-    if (!req.body.descripcion) {
+#### 2. Middlewares (`src/middlewares/`)
+* **Logger (`src/middlewares/logger.middleware.js`):** Registra cada petición HTTP con su timestamp en consola.
+* **Validador (`src/middlewares/validaciones.middleware.js`):** Valida que los datos obligatorios existan antes de llamar al controlador:
+```javascript
+// src/middlewares/validaciones.middleware.js
+export const validarDescripcion = (req, res, next) => {
+    if (!req.body || !req.body.descripcion || req.body.descripcion.trim() === "") {
         return res.status(400).json({
             error: "La descripcion es un campo requerido"
         });
     }
     next();
 };
+```
 
-// 3. Rutas CRUD
+#### 3. Controladores (`src/controllers/tareas.controller.js`)
+Contiene la lógica de negocio y las consultas al ORM (`obtenerTareas`, `obtenerTareaPorId`, `crearTarea`, `actualizarTarea`, `eliminarTarea`), con control de excepciones `try/catch` y respuestas HTTP acordes (`200`, `201`, `400`, `404`, `500`).
 
-// GET /tareas - Obtener todas las tareas
-app.get('/tareas', async (req, res) => {
-    const tareas = await prisma.tarea.findMany();
-    res.json(tareas);
-});
+#### 4. Enrutador Modular (`src/routes/tareas.routes.js`)
+Mapea los métodos y rutas HTTP hacia sus respectivos controladores:
+```javascript
+// src/routes/tareas.routes.js
+import { Router } from "express";
+import {
+    obtenerTareas,
+    obtenerTareaPorId,
+    crearTarea,
+    actualizarTarea,
+    eliminarTarea
+} from "../controllers/tareas.controller.js";
+import { validarDescripcion } from "../middlewares/validaciones.middleware.js";
 
-// GET /tareas/:id - Obtener una tarea por su ID
-app.get('/tareas/:id', async (req, res) => {
-    const id = parseInt(req.params.id);
-    const tarea = await prisma.tarea.findUnique({
-        where: { id }
-    });
+const router = Router();
 
-    if (!tarea) {
-        return res.status(404).json({
-            error: "Tarea no encontrada"
-        });
-    }
+router.get("/", obtenerTareas);
+router.get("/:id", obtenerTareaPorId);
+router.post("/", validarDescripcion, crearTarea);
+router.put("/:id", actualizarTarea);
+router.delete("/:id", eliminarTarea);
 
-    res.json(tarea);
-});
+export default router;
+```
 
-// POST /tareas - Crear una nueva tarea
-app.post('/tareas', validarDescripcion, async (req, res) => {
-    const { descripcion } = req.body;
-    const tarea = await prisma.tarea.create({
-        data: {
-            descripcion
-        }
-    });
+#### 5. Servidor Principal (`src/index.js`)
+Inicializa Express, monta los middlewares globales, conecta el enrutador `/tareas` y levanta el servidor:
+```javascript
+// src/index.js
+import "dotenv/config";
+import express from "express";
+import { loggerMiddleware } from "./middlewares/logger.middleware.js";
+import tareasRoutes from "./routes/tareas.routes.js";
 
-    res.status(201).json(tarea);
-});
+const app = express();
+const PORT = process.env.PORT || 3000;
 
-// PUT /tareas/:id - Actualizar una tarea existente
-app.put('/tareas/:id', async (req, res) => {
-    const id = parseInt(req.params.id);
-    const tareaExiste = await prisma.tarea.findUnique({
-        where: { id }
-    });
+app.use(express.json());
+app.use(loggerMiddleware);
 
-    if (!tareaExiste) {
-        return res.status(404).json({
-            error: "Tarea no encontrada"
-        });
-    }
+app.use("/tareas", tareasRoutes);
 
-    const { descripcion, completada } = req.body;
-
-    const tarea = await prisma.tarea.update({
-        where: { id },
-        data: {
-            ...(descripcion !== undefined && { descripcion }),
-            ...(completada !== undefined && { completada })
-        }
-    });
-
-    res.json(tarea);
-});
-
-// DELETE /tareas/:id - Eliminar una tarea por ID
-app.delete('/tareas/:id', async (req, res) => {
-    const id = parseInt(req.params.id);
-    const tarea = await prisma.tarea.findUnique({
-        where: { id }
-    });
-
-    if (!tarea) {
-        return res.status(404).json({
-            error: "Tarea no encontrada"
-        });
-    }
-
-    await prisma.tarea.delete({
-        where: { id }
-    });
-
-    res.json({
-        mensaje: "Eliminada"
-    });
-});
-
-// 4. Iniciar el servidor
-app.listen(3000, () => {
-    console.log("Servidor en el puerto 3000");
+app.listen(PORT, () => {
+    console.log(`Servidor en el puerto ${PORT}`);
 });
 ```
 
